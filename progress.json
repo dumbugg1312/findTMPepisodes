@@ -1,0 +1,17 @@
+{
+ "status": "running",
+ "model": "whisper-large-v3-turbo",
+ "batch_total": 602,
+ "batch_range": "46..648",
+ "completed": [],
+ "failed": [],
+ "current": {
+  "idx": 1,
+  "of": 602,
+  "state": "transcribing..."
+ },
+ "avg_episode_s": null,
+ "eta_s": null,
+ "n_done_in_batch": 0,
+ "updated": "2026-07-12 22:06:09"
+}
