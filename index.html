@@ -9,20 +9,28 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>📼</text></svg>">
 </head>
 <body>
-<header class="masthead">
-  <a class="logo" href="#search" aria-label="TMP Transcript Archive — home">
-    <span class="logo-tmp">TMP</span>
-    <span class="logo-rest">TRANSCRIPT ARCHIVE</span>
+<header class="topbar">
+  <a class="brand" href="#search" aria-label="TMP Transcript Archive — home">
+    <span class="brand-tmp">TMP</span>
+    <span class="brand-rest">Transcript Archive</span>
   </a>
-  <p class="tagline">what's the episode where <em id="tagline-blank">&hellip;</em></p>
-  <p class="counter" id="counter" aria-live="polite">loading the archive&hellip;</p>
+  <nav class="tabs" aria-label="Main">
+    <a href="#search" data-tab="search">Search</a>
+    <a href="#episodes" data-tab="episodes">Episodes</a>
+    <a href="#cast" data-tab="cast">Cast</a>
+    <a href="#stats" data-tab="stats">Stats</a>
+    <a href="#day" data-tab="day">This Day</a>
+  </nav>
 </header>
 
-<nav class="tabs" aria-label="Main">
-  <a href="#search" data-tab="search">Search</a>
-  <a href="#episodes" data-tab="episodes">Episodes</a>
-  <a href="#day" data-tab="day">This Day in TMP</a>
-</nav>
+<div class="banner" role="img" aria-label="Ten Minute Podcast — neon artwork">
+  <p class="banner-title"><span>Ten Minute</span> <span>Podcast</span></p>
+</div>
+
+<div class="bluebar">
+  <p class="tagline">what's the episode where <em id="tagline-blank">&hellip;</em></p>
+  <p class="counter" id="counter" aria-live="polite">loading the archive&hellip;</p>
+</div>
 
 <main id="main">
   <!-- ============ SEARCH ============ -->
@@ -37,6 +45,7 @@
       <div class="search-opts">
         <label for="spk">Said by</label>
         <select id="spk"><option value="">anyone</option></select>
+        <button type="button" id="random-btn" class="btn-plain btn-random">🎲 take me somewhere stupid</button>
       </div>
     </form>
     <div id="search-status" class="status" role="status"></div>
@@ -61,6 +70,17 @@
     <div id="day-body"></div>
   </section>
 
+  <!-- ============ CAST ============ -->
+  <section id="view-cast" hidden>
+    <div id="cast-page"></div>
+  </section>
+
+  <!-- ============ STATS ============ -->
+  <section id="view-stats" hidden>
+    <h2 class="view-title">By the numbers</h2>
+    <div id="stats-body"></div>
+  </section>
+
   <!-- ============ EPISODE PAGE ============ -->
   <section id="view-ep" hidden>
     <div id="ep-page"></div>
@@ -73,6 +93,9 @@
     <span id="player-at" class="timestamp"></span>
   </div>
   <audio id="player-audio" controls preload="none"></audio>
+  <label class="follow-toggle" title="Highlight the transcript line as it plays">
+    <input type="checkbox" id="player-follow" checked> follow
+  </label>
   <button id="player-close" class="btn-plain" aria-label="Close player">✕</button>
 </div>
 
