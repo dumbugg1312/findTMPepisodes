@@ -180,7 +180,19 @@ function runSearch(qRaw, who) {
     if (who && seg.speakers[row[1]] !== who) continue;
     if (words.every((w) => row[3].includes(w))) hits.push({ ...seg, exact: false });
   }
-  return { hits, mode: "loose" };
+  if (hits.length) return { hits, mode: "loose" };
+  // pass 3: fuzzy — most (not all) query words present, so a wrong word
+  // ("bag of snakes" vs "barrel of snakes") doesn't sink the whole search.
+  // Ranked by how many words matched, best first.
+  const need = Math.max(1, Math.ceil(words.length / 2));
+  for (const seg of iterSegments()) {
+    const row = seg.rows[seg.i];
+    if (who && seg.speakers[row[1]] !== who) continue;
+    const matched = words.filter((w) => row[3].includes(w)).length;
+    if (matched >= need) hits.push({ ...seg, exact: false, score: matched });
+  }
+  hits.sort((a, b) => b.score - a.score);
+  return { hits, mode: "fuzzy" };
 }
 
 function highlight(text, q, mode) {
@@ -272,7 +284,8 @@ async function onSearch(ev) {
     await loadShards();
   }
   const { hits, mode } = runSearch(q, $("#spk").value);
-  hits.sort((a, b) => a.ep - b.ep || a.rows[a.i][0] - b.rows[b.i][0]);
+  if (mode === "fuzzy") hits.sort((a, b) => b.score - a.score || a.ep - b.ep || a.rows[a.i][0] - b.rows[b.i][0]);
+  else hits.sort((a, b) => a.ep - b.ep || a.rows[a.i][0] - b.rows[b.i][0]);
   state.results = hits;
   const done = state.episodes.filter((e) => e.shard !== undefined).length;
   if (!hits.length) {
@@ -284,8 +297,9 @@ async function onSearch(ev) {
       ${done < state.episodes.length ? `<br>(${state.episodes.length - done} episodes still await transcription — it might be in one of those.)` : ""}</div>`;
     return;
   }
-  status.innerHTML = `<strong>${hits.length}</strong> ${mode === "loose" ? "close " : ""}hit${hits.length === 1 ? "" : "s"} across ${done} transcribed episodes` +
-    (mode === "loose" ? " (no exact match — showing lines containing all your words)" : "");
+  status.innerHTML = `<strong>${hits.length}</strong> ${mode !== "exact" ? "close " : ""}hit${hits.length === 1 ? "" : "s"} across ${done} transcribed episodes` +
+    (mode === "loose" ? " (no exact match — showing lines containing all your words)"
+      : mode === "fuzzy" ? " (fuzzy match — showing lines containing most of your words, best matches first)" : "");
   renderResults(true);
   logSearch(q);
   $("#recent-searches").hidden = true;
