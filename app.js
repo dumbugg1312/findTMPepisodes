@@ -127,8 +127,9 @@ async function loadCatalog() {
     if (e.shard !== undefined) state.shardIds.add(e.shard);
   }
   const done = state.episodes.filter((e) => e.shard !== undefined).length;
-  $("#counter").textContent =
-    `📼 ${done} of ${state.episodes.length} episodes transcribed`;
+  $("#counter").innerHTML =
+    `<svg class="icon" aria-hidden="true"><use href="#i-tape"/></svg>` +
+    `${done} of ${state.episodes.length} episodes transcribed`;
   const speakers = new Set();
   for (const e of state.episodes) (e.speakers || []).forEach((s) => speakers.add(s));
   const sel = $("#spk");
@@ -218,8 +219,8 @@ function renderResults(fresh) {
         <a class="ep-link" href="#ep/${hit.ep}">Ep ${hit.ep} — ${esc(meta?.title || "")}</a>
         ${meta?.date ? `<span>${fmtDate(meta.date)}</span>` : ""}
         <span class="timestamp">${fmtTime(start)}</span>
-        <a class="play-link" href="${playUrl(hit.ep, start)}" target="_blank" rel="noopener">▶ play this moment</a>
-        <a class="moment-link" href="${momentHash(hit.ep, start)}" title="permalink to this moment — copy the address to share it">🔗 link</a>
+        <a class="play-link" href="${playUrl(hit.ep, start)}" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg> play this moment</a>
+        <a class="moment-link" href="${momentHash(hit.ep, start)}" title="permalink to this moment — copy the address to share it"><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg> link</a>
       </div>`;
     li.querySelector(".result-quote").addEventListener("click", (ev) =>
       toggleContext(ev.currentTarget, li, hit));
@@ -288,6 +289,7 @@ async function onSearch(ev) {
   renderResults(true);
   logSearch(q);
   $("#recent-searches").hidden = true;
+  $("#try-box").hidden = true;
   clearInterval(recentSearchesTimer);
 }
 
@@ -333,7 +335,7 @@ async function renderEpisodePage(ep, atSeconds = null) {
       ${meta.desc ? `<p class="ep-desc">${esc(meta.desc)}</p>` : ""}
     </div>
     <div class="listen-box">
-      <a class="btn-primary" href="${archiveLink}" target="_blank" rel="noopener">▶ Listen on archive.org</a>
+      <a class="btn-primary" href="${archiveLink}" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg> Listen on archive.org</a>
       <span>Audio lives on the Internet Archive — tap any timestamp to play from that line, right here.</span>
     </div>`;
   if (meta.shard === undefined) {
@@ -519,7 +521,7 @@ async function renderStats() {
        <a href="#ep/${shortest.ep}">Ep ${shortest.ep} — ${esc(shortest.title)}</a> at ${fmtTime(shortest.duration)}.</p>
     <h3 class="stats-h">Catchphrase counter</h3>
     <p class="ep-sub">How often it got said across every transcript. Tap a phrase to see every hit.</p>
-    <div id="phrase-body"><button id="phrase-btn" class="btn-plain">🔎 tally the catchphrases
+    <div id="phrase-body"><button id="phrase-btn" class="btn-plain"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg> tally the catchphrases
       <small>(loads all transcripts, ~12&nbsp;MB)</small></button></div>`;
   $("#phrase-btn").addEventListener("click", tallyPhrases);
 }
@@ -547,9 +549,10 @@ async function tallyPhrases() {
 
 async function randomBit() {
   const btn = $("#random-btn");
+  const labelEl = $("#random-label");
   btn.disabled = true;
-  const label = btn.textContent;
-  btn.textContent = "🎲 rolling…";
+  const label = labelEl.textContent;
+  labelEl.textContent = "rolling…";
   try {
     await loadShards();
     const all = [];
@@ -562,7 +565,7 @@ async function randomBit() {
     playMoment(pick.ep, start);
   } finally {
     btn.disabled = false;
-    btn.textContent = label;
+    labelEl.textContent = label;
   }
 }
 
@@ -702,7 +705,10 @@ function route() {
     if (q && q !== $("#q").value) { $("#q").value = q; onSearch(); }
     else if (q && !state.results.length) onSearch();
   }
-  if (tab === "search" && !qs) startRecentSearchesPolling();
+  if (tab === "search" && !qs) {
+    $("#try-box").hidden = false;
+    startRecentSearchesPolling();
+  }
   if (tab !== "ep") window.scrollTo(0, 0);
 }
 
@@ -729,6 +735,8 @@ async function setTagline() {
 
 async function boot() {
   setTagline();
+  $("#try-list").innerHTML = CATCHPHRASES.map((p) =>
+    `<li><a href="#search?q=${encodeURIComponent(p)}">&ldquo;${esc(p)}&rdquo;</a></li>`).join("");
   $("#search-form").addEventListener("submit", onSearch);
   $("#spk").addEventListener("change", () => state.query && onSearch());
   $("#more-btn").addEventListener("click", () => renderResults(false));
@@ -744,7 +752,7 @@ async function boot() {
   try {
     await loadCatalog();
   } catch (err) {
-    $("#counter").textContent = "⚠ " + err.message;
+    $("#counter").textContent = "Error: " + err.message;
   }
   route();
   $("#q").focus();

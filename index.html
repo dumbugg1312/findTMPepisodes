@@ -5,10 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TMP Transcript Archive</title>
 <meta name="description" content="Search every episode of Ten Minute Podcast by phrase — find the episode, the timestamp, and who said it.">
+<meta name="theme-color" content="#5872c0">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="TMP Transcript Archive">
+<meta property="og:title" content="TMP Transcript Archive">
+<meta property="og:description" content="Search every episode of Ten Minute Podcast by phrase — find the episode, the timestamp, and who said it.">
+<meta name="twitter:card" content="summary">
 <link rel="stylesheet" href="style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>📼</text></svg>">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%235872c0'/%3E%3Crect x='2' y='4' width='12' height='8' rx='1' fill='none' stroke='white' stroke-width='1.4'/%3E%3Ccircle cx='5.5' cy='8' r='1.2' fill='white'/%3E%3Ccircle cx='10.5' cy='8' r='1.2' fill='white'/%3E%3Cpath d='M6.7 8h2.6' stroke='white'/%3E%3C/svg%3E">
 </head>
 <body>
+
+<svg style="display:none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <symbol id="i-play" viewBox="0 0 16 16"><path d="M4 2.2v11.6L13.2 8z"/></symbol>
+    <symbol id="i-x" viewBox="0 0 16 16"><path d="M3.1 1.9 8 6.8l4.9-4.9 1.2 1.2L9.2 8l4.9 4.9-1.2 1.2L8 9.2l-4.9 4.9-1.2-1.2L6.8 8 1.9 3.1z"/></symbol>
+    <symbol id="i-link" viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M6.5 9.5 9.5 6.5M5.2 7.4 3.4 9.2a2.7 2.7 0 0 0 3.8 3.8l1.8-1.8M10.8 8.6l1.8-1.8a2.7 2.7 0 0 0-3.8-3.8L7 4.8"/></symbol>
+    <symbol id="i-dice" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M3 1.5h10A1.5 1.5 0 0 1 14.5 3v10a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 13V3A1.5 1.5 0 0 1 3 1.5zm2 2.2a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6zm6 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6zM8 6.7a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6zM5 9.7a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6zm6 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6z"/></symbol>
+    <symbol id="i-tape" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M2 3h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm3.5 3.2a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6zm5 0a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6zm-4 1.1h3v1.4h-3z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.8" d="M10.4 10.4 14 14M11.5 6.75a4.75 4.75 0 1 1-9.5 0 4.75 4.75 0 0 1 9.5 0z"/></symbol>
+  </defs>
+</svg>
+
 <header class="topbar">
   <a class="brand" href="#search" aria-label="TMP Transcript Archive — home">
     <span class="brand-tmp">TMP</span>
@@ -23,12 +41,12 @@
   </nav>
 </header>
 
-<div class="banner" role="img" aria-label="Ten Minute Podcast — neon artwork">
-  <p class="banner-title"><span>Ten Minute</span> <span>Podcast</span></p>
+<div class="banner">
+  <p class="banner-title">Ten Minute Podcast</p>
+  <p class="tagline">what's the episode where <em id="tagline-blank">&hellip;</em></p>
 </div>
 
 <div class="bluebar">
-  <p class="tagline">what's the episode where <em id="tagline-blank">&hellip;</em></p>
   <p class="counter" id="counter" aria-live="polite">loading the archive&hellip;</p>
 </div>
 
@@ -45,11 +63,15 @@
       <div class="search-opts">
         <label for="spk">Said by</label>
         <select id="spk"><option value="">anyone</option></select>
-        <button type="button" id="random-btn" class="btn-plain btn-random">🎲 take me somewhere stupid</button>
+        <button type="button" id="random-btn" class="btn-plain btn-random"><svg class="icon" aria-hidden="true"><use href="#i-dice"/></svg> <span id="random-label">take me somewhere stupid</span></button>
       </div>
     </form>
-    <div id="recent-searches" class="recent-searches" hidden>
-      <h2 class="recent-searches-title">Recently searched</h2>
+    <div id="try-box" class="chip-box">
+      <h2 class="chip-box-title">Try one of these</h2>
+      <ul id="try-list"></ul>
+    </div>
+    <div id="recent-searches" class="chip-box recent-searches" hidden>
+      <h2 class="chip-box-title">Recently searched</h2>
       <ul id="recent-searches-list"></ul>
     </div>
     <div id="search-status" class="status" role="status"></div>
@@ -100,7 +122,7 @@
   <label class="follow-toggle" title="Highlight the transcript line as it plays">
     <input type="checkbox" id="player-follow" checked> follow
   </label>
-  <button id="player-close" class="btn-plain" aria-label="Close player">✕</button>
+  <button id="player-close" class="btn-plain" aria-label="Close player"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
 </div>
 
 <footer class="footer">
