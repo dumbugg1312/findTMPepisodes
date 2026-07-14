@@ -240,6 +240,43 @@ main {
 }
 .status strong { color: var(--ink); }
 
+/* recently searched */
+.recent-searches {
+  margin: 1.25rem 0;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.recent-searches-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-mute);
+  font-weight: 600;
+}
+.recent-searches ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.recent-searches li { margin: 0; }
+.recent-searches a {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: var(--blue-deep);
+  text-decoration: none;
+}
+.recent-searches a:hover { border-color: var(--blue-deep); }
+
 /* results */
 .results { list-style: none; margin: 0; padding: 0; }
 .result {

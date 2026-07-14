@@ -6,6 +6,12 @@
 const $ = (sel) => document.querySelector(sel);
 const RESULTS_PAGE = 30;
 
+/* recently-searched list is stored in Supabase (public anon key, RLS-limited
+   to insert + select on the `searches` table — see supabase_setup.sql) */
+const SUPABASE_URL = "https://ypqxmzyqzaaplitzmesg.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlwcXhtenlxemFhcGxpdHptZXNnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM5ODQzNTIsImV4cCI6MjA5OTU2MDM1Mn0.RUpfATJKCwLwEwN8nw4EvGrDGsLnWR2Nihg0fcNaSHk";
+const sb = window.supabase?.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 const state = {
   episodes: [],          // full catalog (transcribed + pending)
   byEp: new Map(),
@@ -280,6 +286,9 @@ async function onSearch(ev) {
   status.innerHTML = `<strong>${hits.length}</strong> ${mode === "loose" ? "close " : ""}hit${hits.length === 1 ? "" : "s"} across ${done} transcribed episodes` +
     (mode === "loose" ? " (no exact match — showing lines containing all your words)" : "");
   renderResults(true);
+  logSearch(q);
+  $("#recent-searches").hidden = true;
+  clearInterval(recentSearchesTimer);
 }
 
 /* ---------- episodes view ---------- */
@@ -588,6 +597,75 @@ function renderDay() {
   }).join("") + "</ul>";
 }
 
+/* ---------- recently searched (global, cross-visitor) ---------- */
+
+/* Racial/ethnic-slur filter for the public "recently searched" list only —
+   search itself is never blocked, this just keeps slurs off the shared list.
+   Checked both before logging (so they never reach the DB) and again on
+   display (in case a row predates this filter or the client check is bypassed). */
+const SLUR_PATTERNS = [
+  /n[i1!|]+[gq]+[e3a@]*r+/i,
+  /f[a4@]g+([o0]t+)?/i,
+  /k[i1!|]+k+[e3]+/i,
+  /sp[i1!|]+c+/i,
+  /ch[i1!|]+n+k+/i,
+  /g[o0]+[o0]+k+/i,
+  /w[e3]+tb[a4@]+ck+/i,
+  /r[e3]+t[a4@]+rd+/i,
+  /tr[a4@]+nn+y+/i,
+  /coon/i,
+  /beaner/i,
+  /jungle bunny/i,
+  /towelhead/i,
+  /sand ?nigg/i,
+];
+
+function containsSlur(text) {
+  const normalized = text.replace(/[^a-z0-9]/gi, "");
+  return SLUR_PATTERNS.some((re) => re.test(normalized) || re.test(text));
+}
+
+let recentSearchesTimer = null;
+let lastLoggedSearch = null;
+const RECENT_SEARCHES_LIMIT = 25;
+
+async function logSearch(q) {
+  if (!sb || q === lastLoggedSearch || containsSlur(q)) return;
+  lastLoggedSearch = q;
+  try {
+    await sb.from("searches").insert({ q });
+  } catch {
+    // best-effort — a logging failure shouldn't affect search itself
+  }
+}
+
+async function loadRecentSearches() {
+  const box = $("#recent-searches");
+  const list = $("#recent-searches-list");
+  if (!sb) { box.hidden = true; return; }
+  try {
+    const { data, error } = await sb
+      .from("searches")
+      .select("q")
+      .order("created_at", { ascending: false })
+      .limit(RECENT_SEARCHES_LIMIT);
+    if (error) throw error;
+    const clean = data.filter((e) => !containsSlur(e.q));
+    if (!clean.length) { box.hidden = true; return; }
+    list.innerHTML = clean.map((e) =>
+      `<li><a href="#search?q=${encodeURIComponent(e.q)}">${esc(e.q)}</a></li>`).join("");
+    box.hidden = false;
+  } catch {
+    box.hidden = true;
+  }
+}
+
+function startRecentSearchesPolling() {
+  loadRecentSearches();
+  clearInterval(recentSearchesTimer);
+  recentSearchesTimer = setInterval(loadRecentSearches, 30000);
+}
+
 /* ---------- routing ---------- */
 
 function route() {
@@ -624,6 +702,7 @@ function route() {
     if (q && q !== $("#q").value) { $("#q").value = q; onSearch(); }
     else if (q && !state.results.length) onSearch();
   }
+  if (tab === "search" && !qs) startRecentSearchesPolling();
   if (tab !== "ep") window.scrollTo(0, 0);
 }
 

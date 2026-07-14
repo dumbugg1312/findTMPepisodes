@@ -48,6 +48,10 @@
         <button type="button" id="random-btn" class="btn-plain btn-random">🎲 take me somewhere stupid</button>
       </div>
     </form>
+    <div id="recent-searches" class="recent-searches" hidden>
+      <h2 class="recent-searches-title">Recently searched</h2>
+      <ul id="recent-searches-list"></ul>
+    </div>
     <div id="search-status" class="status" role="status"></div>
     <ol id="results" class="results"></ol>
     <div id="search-more" hidden>
@@ -110,6 +114,7 @@
      Problem with this site? <span class="takedown">Takedown requests honored, no questions.</span></p>
 </footer>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
