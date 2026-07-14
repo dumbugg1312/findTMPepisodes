@@ -340,7 +340,7 @@ async function renderEpisodePage(ep, atSeconds = null) {
     </div>`;
   if (meta.shard === undefined) {
     root.innerHTML = head + `<div class="empty"><span class="big">Not transcribed yet.</span>
-      This one is still in the queue — the audio link above works right now.</div>`;
+      This one is still in the queue. The audio link above works right now.</div>`;
     return;
   }
   root.innerHTML = head + `<div class="skeleton"></div><div class="skeleton"></div>`;
@@ -471,7 +471,7 @@ async function renderCastPage(name) {
       if (s !== name && isNamedSpeaker(s)) co.set(s, (co.get(s) || 0) + 1);
   const top = [...co.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
   const era = first && last
-    ? `${fmtDate(first.date)} (Ep ${first.ep}) &rarr; ${fmtDate(last.date)} (Ep ${last.ep})`
+    ? `${fmtDate(first.date)} (Ep ${first.ep}) to ${fmtDate(last.date)} (Ep ${last.ep})`
     : "dates unknown";
   root.innerHTML = `
     <a class="back-link" href="#cast">&larr; all cast</a>
