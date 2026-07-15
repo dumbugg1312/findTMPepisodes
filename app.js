@@ -60,12 +60,15 @@ function playUrl(ep, seconds) {
 
 /* mini player: streams the mp3 straight from archive.org and seeks to the
    moment (their /details page ignores ?start=, so we play it ourselves) */
-const momentHash = (ep, seconds) => `#ep/${ep}?t=${Math.floor(seconds)}`;
+const momentHash = (ep, seconds, endSeconds) =>
+  `#ep/${ep}?t=${Math.floor(seconds)}` + (endSeconds != null ? `&e=${Math.floor(endSeconds)}` : "");
 
-function playMoment(ep, seconds) {
+function playMoment(ep, seconds, clipEndSeconds = null) {
   const m = state.byEp.get(ep);
   if (!m) return;
   state.playingEp = ep;
+  state.playingStart = seconds;
+  state.clipEnd = clipEndSeconds;
   const t = Math.max(0, Math.floor(seconds - 3));
   const bar = $("#player");
   const audio = $("#player-audio");
@@ -73,7 +76,9 @@ function playMoment(ep, seconds) {
   document.body.classList.add("has-player");
   $("#player-ep").textContent = `Ep ${ep} — ${m.title}`;
   $("#player-ep").href = `#ep/${ep}`;
-  $("#player-at").textContent = `from ${fmtTime(seconds)}`;
+  $("#player-at").textContent = clipEndSeconds != null
+    ? `clip ${fmtTime(seconds)}–${fmtTime(clipEndSeconds)}` : `from ${fmtTime(seconds)}`;
+  audio.playbackRate = state.playbackRate || 1;
   const src = `https://archive.org/download/${m.item}/${encodeURIComponent(m.file)}`;
   const seekAndPlay = () => {
     try { audio.currentTime = t; } catch { /* not seekable yet */ }
@@ -108,6 +113,71 @@ function closePlayer() {
   document.body.classList.remove("has-player");
 }
 
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      return true;
+    } catch { return false; }
+  }
+}
+
+/* renders a shareable quote card (cornflower chrome, matching the site) to a
+   PNG and triggers a download — no server round-trip needed */
+function downloadQuoteImage({ text, name, ep, title }) {
+  const W = 1000, H = 560;
+  const canvas = document.createElement("canvas");
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#e9edf7";
+  ctx.fillRect(0, 0, W, H);
+  const grad = ctx.createLinearGradient(0, 0, 0, 120);
+  grad.addColorStop(0, "#5c86c9");
+  grad.addColorStop(1, "#3f66a8");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, 96);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 30px Verdana, sans-serif";
+  ctx.fillText("Ten Minute Podcast", 36, 60);
+  ctx.fillStyle = "#1b2947";
+  ctx.font = "bold 42px Georgia, serif";
+  wrapText(ctx, `“${text}”`, 36, 190, W - 72, 54);
+  ctx.font = "24px Verdana, sans-serif";
+  ctx.fillStyle = "#3f4f78";
+  ctx.fillText(`— ${name}, Ep ${ep}${title ? ` · ${title}` : ""}`, 36, H - 44);
+  canvas.toBlob((blob) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `tmp-ep${ep}-quote.png`;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+}
+
+function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
+  const words = text.split(" ");
+  let line = "";
+  for (const word of words) {
+    const test = line + word + " ";
+    if (ctx.measureText(test).width > maxWidth && line) {
+      ctx.fillText(line, x, y);
+      line = word + " ";
+      y += lineHeight;
+    } else {
+      line = test;
+    }
+  }
+  ctx.fillText(line, x, y);
+}
+
 const fmtDate = (iso) => {
   if (!iso) return null;
   const [y, m, d] = iso.split("-").map(Number);
@@ -119,7 +189,7 @@ const fmtDate = (iso) => {
 /* ---------- data loading ---------- */
 
 async function loadCatalog() {
-  const res = await fetch("data/episodes.json", { cache: "no-cache" });
+  const res = await fetch("data/episodes.json");
   if (!res.ok) throw new Error("episodes.json missing — run scripts/build_index.py");
   state.episodes = await res.json();
   for (const e of state.episodes) {
@@ -127,9 +197,11 @@ async function loadCatalog() {
     if (e.shard !== undefined) state.shardIds.add(e.shard);
   }
   const done = state.episodes.filter((e) => e.shard !== undefined).length;
-  $("#counter").innerHTML =
-    `<svg class="icon" aria-hidden="true"><use href="#i-tape"/></svg>` +
+  const counterText = `<svg class="icon" aria-hidden="true"><use href="#i-tape"/></svg>` +
     `${done} of ${state.episodes.length} episodes transcribed`;
+  $("#counter").innerHTML = done < state.episodes.length
+    ? `<a href="#episodes?pending=1" class="counter-link">${counterText} — see what's left</a>`
+    : counterText;
   const speakers = new Set();
   for (const e of state.episodes) (e.speakers || []).forEach((s) => speakers.add(s));
   const sel = $("#spk");
@@ -140,17 +212,34 @@ async function loadCatalog() {
   });
 }
 
+/* Loads every shard, but resolves the returned promise as soon as the FIRST
+   shard lands (with the rest continuing in the background) — callers that
+   want "search as soon as anything is ready" use loadFirstShard(); callers
+   that need the full corpus (stats, catchphrase tally) use loadShards(). */
+function fetchShard(id) {
+  return fetch(`data/shard-${String(id).padStart(2, "0")}.json`)
+    .then((res) => res.json())
+    .then((sh) => {
+      for (const rows of Object.values(sh.eps))
+        for (const r of rows) r.push(r[2].toLowerCase());
+      state.shards.set(id, sh);
+      document.dispatchEvent(new CustomEvent("shard-loaded", { detail: { id, total: state.shardIds.size, loaded: state.shards.size } }));
+      return sh;
+    });
+}
+
 function loadShards() {
   if (state.loadingShards) return state.loadingShards;
-  state.loadingShards = Promise.all([...state.shardIds].map(async (id) => {
-    const res = await fetch(`data/shard-${String(id).padStart(2, "0")}.json`,
-                            { cache: "no-cache" });
-    const sh = await res.json();
-    for (const rows of Object.values(sh.eps))
-      for (const r of rows) r.push(r[2].toLowerCase());
-    state.shards.set(id, sh);
-  }));
+  state.loadingShards = Promise.all([...state.shardIds].map(fetchShard));
   return state.loadingShards;
+}
+
+function loadFirstShard() {
+  if (state.shards.size) return Promise.resolve();
+  if (state.loadingShards) return state.loadingShards;
+  const all = [...state.shardIds].map(fetchShard);
+  state.loadingShards = Promise.all(all);
+  return Promise.race(all);
 }
 
 /* ---------- search ---------- */
@@ -162,37 +251,113 @@ function* iterSegments() {
         yield { ep: +ep, rows, i, speakers: sh.speakers };
 }
 
+/* Whisper commonly mishears cast names — expand a query word to the
+   spellings/soundalikes people might actually type or that the transcript
+   might actually contain, in either direction. */
+const NAME_VARIANTS = [
+  ["bryan", "brian", "brain", "brine"],
+  ["callen", "callan", "cullen"],
+  ["delia", "d'elia", "deelia", "dilia"],
+  ["chris", "cris", "kris"],
+  ["sasso", "sassoe", "sasoe"],
+  ["will", "wil"],
+  ["wilbot", "will bot", "wille bot"],
+];
+const VARIANT_OF = new Map();
+for (const group of NAME_VARIANTS)
+  for (const w of group) VARIANT_OF.set(w, group);
+
+function wordVariants(w) {
+  return VARIANT_OF.get(w) || [w];
+}
+
+/* does `haystack` contain any spelling variant of word `w`? */
+function includesVariant(haystack, w) {
+  for (const v of wordVariants(w)) if (haystack.includes(v)) return true;
+  return false;
+}
+
+/* relevance score for a ranked (non-exact-positional) hit: reward lines where
+   the query is a larger share of what was said, and named speakers (real
+   cast/guests) over anonymous "Speaker A" fragments. */
+function relevanceScore(text, name, wordCount) {
+  const density = wordCount / Math.max(3, text.split(/\s+/).length);
+  const namedBonus = isNamedSpeaker(name) ? 0.25 : 0;
+  return density + namedBonus;
+}
+
+/* segment text plus a peek into the next segment, for phrases that were
+   chopped across two transcript lines by the ASR's own segmentation
+   ("shut up" / "Chad" landing as two separate rows). */
+function spanText(seg) {
+  const row = seg.rows[seg.i];
+  const next = seg.rows[seg.i + 1];
+  return next ? row[3] + " " + next[3] : row[3];
+}
+
 function runSearch(qRaw, who) {
   const q = qRaw.toLowerCase().trim();
-  const hits = [];
-  // pass 1: exact substring
-  for (const seg of iterSegments()) {
-    const row = seg.rows[seg.i];
-    if (who && seg.speakers[row[1]] !== who) continue;
-    if (row[3].includes(q)) hits.push({ ...seg, exact: true });
-  }
-  if (hits.length) return { hits, mode: "exact" };
-  // pass 2: all words present in segment (looser, catches whisper mishears less)
   const words = q.split(/\s+/).filter((w) => w.length > 1);
-  if (words.length < 2) return { hits, mode: "exact" };
+  const hits = [];
+  // pass 1: exact substring, including phrases split across two adjacent lines
   for (const seg of iterSegments()) {
     const row = seg.rows[seg.i];
     if (who && seg.speakers[row[1]] !== who) continue;
-    if (words.every((w) => row[3].includes(w))) hits.push({ ...seg, exact: false });
+    if (row[3].includes(q)) { hits.push({ ...seg, exact: true, spans: false }); continue; }
+    if (words.length > 1 && spanText(seg).includes(q)) hits.push({ ...seg, exact: true, spans: true });
   }
-  if (hits.length) return { hits, mode: "loose" };
+  if (hits.length) {
+    for (const h of hits) {
+      const name = h.speakers[h.rows[h.i][1]] || "Unknown";
+      h.score = relevanceScore(h.spans ? spanText(h) : h.rows[h.i][3], name, words.length || 1);
+    }
+    hits.sort((a, b) => b.score - a.score);
+    return { hits, mode: "exact" };
+  }
+  if (words.length < 2) return { hits, mode: "exact" };
+  // pass 2: all words present in segment (looser, catches whisper mishears less),
+  // with name/soundalike variants tried in both directions
+  for (const seg of iterSegments()) {
+    const row = seg.rows[seg.i];
+    if (who && seg.speakers[row[1]] !== who) continue;
+    if (words.every((w) => includesVariant(row[3], w))) hits.push({ ...seg, exact: false, spans: false });
+  }
+  if (hits.length) {
+    for (const h of hits) {
+      const name = h.speakers[h.rows[h.i][1]] || "Unknown";
+      h.score = relevanceScore(h.rows[h.i][3], name, words.length);
+    }
+    hits.sort((a, b) => b.score - a.score);
+    return { hits, mode: "loose" };
+  }
   // pass 3: fuzzy — most (not all) query words present, so a wrong word
   // ("bag of snakes" vs "barrel of snakes") doesn't sink the whole search.
-  // Ranked by how many words matched, best first.
+  // Ranked by how many words matched, then by relevance.
   const need = Math.max(1, Math.ceil(words.length / 2));
   for (const seg of iterSegments()) {
     const row = seg.rows[seg.i];
     if (who && seg.speakers[row[1]] !== who) continue;
-    const matched = words.filter((w) => row[3].includes(w)).length;
-    if (matched >= need) hits.push({ ...seg, exact: false, score: matched });
+    const matched = words.filter((w) => includesVariant(row[3], w)).length;
+    if (matched >= need) {
+      const name = seg.speakers[row[1]] || "Unknown";
+      hits.push({ ...seg, exact: false, spans: false, matched, score: matched + relevanceScore(row[3], name, matched) * 0.1 });
+    }
+  }
+  if (hits.length) {
+    hits.sort((a, b) => b.score - a.score);
+    return { hits, mode: "fuzzy" };
+  }
+  // pass 4: last resort — at least one word matches (incl. variants). Only
+  // ever used to power "did you mean" suggestions on an otherwise-empty
+  // result, never shown as the primary result set.
+  for (const seg of iterSegments()) {
+    const row = seg.rows[seg.i];
+    if (who && seg.speakers[row[1]] !== who) continue;
+    const matched = words.filter((w) => includesVariant(row[3], w)).length;
+    if (matched >= 1) hits.push({ ...seg, exact: false, spans: false, matched, score: matched });
   }
   hits.sort((a, b) => b.score - a.score);
-  return { hits, mode: "fuzzy" };
+  return { hits: hits.slice(0, 5), mode: "suggest" };
 }
 
 function highlight(text, q, mode) {
@@ -204,8 +369,10 @@ function highlight(text, q, mode) {
   }
   let out = esc(text);
   for (const w of q.toLowerCase().split(/\s+/).filter((w) => w.length > 1)) {
-    out = out.replace(new RegExp(`(${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "ig"),
-      "<mark>$1</mark>");
+    for (const v of wordVariants(w)) {
+      out = out.replace(new RegExp(`(${v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "ig"),
+        "<mark>$1</mark>");
+    }
   }
   return out;
 }
@@ -215,34 +382,59 @@ function renderResults(fresh) {
   if (fresh) { list.innerHTML = ""; state.shown = 0; }
   const batch = state.results.slice(state.shown, state.shown + RESULTS_PAGE);
   state.shown += batch.length;
-  for (const hit of batch) {
-    const row = hit.rows[hit.i];
-    const [start, spkIdx, text] = row;
-    const name = hit.speakers[spkIdx] || "Unknown";
-    const meta = state.byEp.get(hit.ep);
-    const li = document.createElement("li");
-    li.className = "result";
-    li.innerHTML = `
-      <button class="result-quote" aria-expanded="false" title="show surrounding lines">
-        <span class="quote-speaker ${speakerClass(name)}">${esc(name)}:</span>
-        <span class="quote-text">&ldquo;${highlight(text, state.query, hit.mode)}&rdquo;</span>
-      </button>
-      <div class="result-meta">
-        <a class="ep-link" href="#ep/${hit.ep}">Ep ${hit.ep} — ${esc(meta?.title || "")}</a>
-        ${meta?.date ? `<span>${fmtDate(meta.date)}</span>` : ""}
-        <span class="timestamp">${fmtTime(start)}</span>
-        <a class="play-link" href="${playUrl(hit.ep, start)}" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg> play this moment</a>
-        <a class="moment-link" href="${momentHash(hit.ep, start)}" title="permalink to this moment — copy the address to share it"><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg> link</a>
-      </div>`;
-    li.querySelector(".result-quote").addEventListener("click", (ev) =>
-      toggleContext(ev.currentTarget, li, hit));
-    li.querySelector(".play-link").addEventListener("click", (ev) => {
-      ev.preventDefault();
-      playMoment(hit.ep, start);
-    });
-    list.append(li);
-  }
+  for (const hit of batch) list.append(buildResultRow(hit));
   $("#search-more").hidden = state.shown >= state.results.length;
+}
+
+function buildResultRow(hit) {
+  const row = hit.rows[hit.i];
+  const [start, spkIdx, text] = row;
+  const name = hit.speakers[spkIdx] || "Unknown";
+  const meta = state.byEp.get(hit.ep);
+  const displayText = hit.spans ? spanText(hit) : text;
+  const li = document.createElement("li");
+  li.className = "result";
+  li.dataset.ep = hit.ep;
+  li.dataset.start = start;
+  li.innerHTML = `
+    <button class="result-quote" aria-expanded="false" title="show surrounding lines">
+      <span class="quote-speaker ${speakerClass(name)}">${esc(name)}:</span>
+      <span class="quote-text">&ldquo;${highlight(displayText, state.query, hit.mode)}&rdquo;${hit.spans ? ' <span class="spans-note">(continues into next line)</span>' : ""}</span>
+    </button>
+    <div class="result-meta">
+      <a class="ep-link" href="#ep/${hit.ep}">Ep ${hit.ep} — ${esc(meta?.title || "")}</a>
+      ${meta?.date ? `<span>${fmtDate(meta.date)}</span>` : ""}
+      <span class="timestamp">${fmtTime(start)}</span>
+      <a class="play-link" href="${playUrl(hit.ep, start)}" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg> play this moment</a>
+      <a class="moment-link" href="${momentHash(hit.ep, start)}" title="permalink to this moment — copy the address to share it"><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg> link</a>
+      <button class="copy-quote-btn btn-plain" type="button" title="copy this quote as text"><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg> copy quote</button>
+      <button class="quote-img-btn btn-plain" type="button" title="save a shareable quote image">quote image</button>
+    </div>`;
+  li.querySelector(".result-quote").addEventListener("click", (ev) =>
+    toggleContext(ev.currentTarget, li, hit));
+  li.querySelector(".play-link").addEventListener("click", (ev) => {
+    ev.preventDefault();
+    playMoment(hit.ep, start);
+  });
+  li.querySelector(".copy-quote-btn").addEventListener("click", async (ev) => {
+    ev.stopPropagation();
+    const btn = ev.currentTarget;
+    const ok = await copyToClipboard(`"${displayText}" — ${name}, Ep ${hit.ep}${meta?.title ? ` (${meta.title})` : ""} ${location.origin}${location.pathname}${momentHash(hit.ep, start)}`);
+    flashCopyButton(btn, ok, "copy quote");
+  });
+  li.querySelector(".quote-img-btn").addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    downloadQuoteImage({ text: displayText, name, ep: hit.ep, title: meta?.title || "" });
+  });
+  return li;
+}
+
+function flashCopyButton(btn, ok, restLabel) {
+  if (!ok) return;
+  const original = btn.textContent;
+  btn.textContent = "copied!";
+  btn.classList.add("copied");
+  setTimeout(() => { btn.textContent = original || restLabel; btn.classList.remove("copied"); }, 1400);
 }
 
 function toggleContext(btn, li, hit) {
@@ -256,7 +448,10 @@ function toggleContext(btn, li, hit) {
     const name = hit.speakers[spkIdx] || "Unknown";
     const p = document.createElement("p");
     p.className = "ctx-line" + (k === hit.i ? " hit" : "");
-    p.innerHTML = `<span class="quote-speaker ${speakerClass(name)}">${esc(name)}:</span> ${esc(text)}`;
+    p.dataset.start = s;
+    p.innerHTML = `<button class="ctx-play" type="button" title="play from here"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg></button>
+      <span class="quote-speaker ${speakerClass(name)}">${esc(name)}:</span> ${esc(text)}`;
+    p.querySelector(".ctx-play").addEventListener("click", () => playMoment(hit.ep, s));
     div.append(p);
   }
   li.append(div);
@@ -281,43 +476,78 @@ async function onSearch(ev) {
   if (!state.shards.size) {
     $("#results").innerHTML = `<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>`;
     status.textContent = "loading transcripts (first search only)…";
-    await loadShards();
+    await loadFirstShard();
   }
-  const { hits, mode } = runSearch(q, $("#spk").value);
-  if (mode === "fuzzy") hits.sort((a, b) => b.score - a.score || a.ep - b.ep || a.rows[a.i][0] - b.rows[b.i][0]);
-  else hits.sort((a, b) => a.ep - b.ep || a.rows[a.i][0] - b.rows[b.i][0]);
-  state.results = hits;
-  const done = state.episodes.filter((e) => e.shard !== undefined).length;
-  if (!hits.length) {
-    $("#results").innerHTML = "";
-    $("#search-more").hidden = true;
-    status.innerHTML = `<div class="empty"><span class="big">No dice.</span>
-      Searched ${done} transcribed episodes. Try fewer or different words —
-      the robot transcriber occasionally mishears names.
-      ${done < state.episodes.length ? `<br>(${state.episodes.length - done} episodes still await transcription — it might be in one of those.)` : ""}</div>`;
-    return;
-  }
-  status.innerHTML = `<strong>${hits.length}</strong> ${mode !== "exact" ? "close " : ""}hit${hits.length === 1 ? "" : "s"} across ${done} transcribed episodes` +
-    (mode === "loose" ? " (no exact match — showing lines containing all your words)"
-      : mode === "fuzzy" ? " (fuzzy match — showing lines containing most of your words, best matches first)" : "");
-  renderResults(true);
+  executeSearch();
   logSearch(q);
   $("#recent-searches").hidden = true;
   $("#try-box").hidden = true;
   clearInterval(recentSearchesTimer);
 }
 
+/* runs the current state.query against whatever shards are loaded so far and
+   renders. Called both after the first shard lands, and again — silently —
+   each time a later shard finishes, so results keep growing on slow
+   connections without the user having to re-search. */
+function executeSearch() {
+  const q = state.query;
+  const status = $("#search-status");
+  const { hits, mode } = runSearch(q, $("#spk").value);
+  const done = state.episodes.filter((e) => e.shard !== undefined).length;
+  const loaded = state.shards.size, total = state.shardIds.size;
+  const stillLoading = loaded < total
+    ? ` <span class="loading-more">— still loading ${total - loaded} more shard${total - loaded === 1 ? "" : "s"}…</span>` : "";
+  if (mode === "suggest" || !hits.length) {
+    $("#results").innerHTML = "";
+    $("#search-more").hidden = true;
+    document.querySelectorAll(".did-you-mean").forEach((el) => el.remove());
+    const suggestions = mode === "suggest" ? hits : [];
+    status.innerHTML = `<div class="empty"><span class="big">No dice.</span>
+      Searched ${done} transcribed episodes. Try fewer or different words —
+      the robot transcriber occasionally mishears names.
+      ${done < state.episodes.length ? `<br>(${state.episodes.length - done} episodes still await transcription — it might be in one of those.)` : ""}${stillLoading}</div>`;
+    if (suggestions.length) {
+      const box = document.createElement("div");
+      box.className = "did-you-mean";
+      box.innerHTML = `<p class="did-you-mean-label">Closest lines we could find:</p>`;
+      const ul = document.createElement("ul");
+      ul.className = "results";
+      state.results = [];
+      suggestions.forEach((hit) => ul.append(buildResultRow({ ...hit, mode: "loose" })));
+      box.append(ul);
+      $("#search-status").insertAdjacentElement("afterend", box);
+    }
+    return;
+  }
+  document.querySelectorAll(".did-you-mean").forEach((el) => el.remove());
+  state.results = hits;
+  status.innerHTML = `<strong>${hits.length}</strong> ${mode !== "exact" ? "close " : ""}hit${hits.length === 1 ? "" : "s"} across ${done} transcribed episodes` +
+    (mode === "loose" ? " (no exact match — showing lines containing all your words, best matches first)"
+      : mode === "fuzzy" ? " (fuzzy match — showing lines containing most of your words, best matches first)" : "") + stillLoading;
+  renderResults(true);
+}
+
+let shardRefreshDebounce = null;
+document.addEventListener("shard-loaded", () => {
+  if (!state.query) return;
+  clearTimeout(shardRefreshDebounce);
+  shardRefreshDebounce = setTimeout(executeSearch, 150);
+});
+
 /* ---------- episodes view ---------- */
 
-function renderEpisodes(filter = "") {
+let episodesPendingOnly = false;
+function renderEpisodes(filter = "", pendingOnly = false) {
   const f = filter.toLowerCase();
   const list = $("#ep-list");
+  const banner = $("#ep-pending-banner");
   list.innerHTML = "";
   const frag = document.createDocumentFragment();
   for (const e of state.episodes) {
+    const done = e.shard !== undefined;
+    if (pendingOnly && done) continue;
     if (f && !(`${e.ep} ${e.title}`.toLowerCase().includes(f))) continue;
     const li = document.createElement("li");
-    const done = e.shard !== undefined;
     li.className = "ep-row" + (done ? "" : " is-pending");
     li.innerHTML = `
       <span class="num">${e.ep}</span>
@@ -327,13 +557,23 @@ function renderEpisodes(filter = "") {
     frag.append(li);
   }
   list.append(frag);
+  if (banner) {
+    banner.hidden = !pendingOnly;
+    if (pendingOnly) {
+      const n = state.episodes.filter((e) => e.shard === undefined).length;
+      banner.innerHTML = n
+        ? `Showing ${n} untranscribed episode${n === 1 ? "" : "s"}. <a href="#episodes">show all episodes</a>`
+        : `Everything's transcribed! <a href="#episodes">show all episodes</a>`;
+    }
+  }
   if (!list.children.length)
-    list.innerHTML = `<div class="empty"><span class="big">No episode matches.</span></div>`;
+    list.innerHTML = `<div class="empty"><span class="big">${pendingOnly ? "Nothing pending — it's all transcribed." : "No episode matches."}</span></div>`;
 }
 
 /* ---------- episode page ---------- */
 
-async function renderEpisodePage(ep, atSeconds = null) {
+let epRenderToken = 0;
+async function renderEpisodePage(ep, atSeconds = null, clipEndSeconds = null) {
   const root = $("#ep-page");
   const meta = state.byEp.get(ep);
   state.epPageLines = null;
@@ -341,6 +581,13 @@ async function renderEpisodePage(ep, atSeconds = null) {
   state.karaokeIdx = -1;
   if (!meta) { root.innerHTML = `<div class="empty"><span class="big">No episode ${ep}.</span></div>`; return; }
   const archiveLink = `https://archive.org/details/${meta.item}/${encodeURIComponent(meta.file)}`;
+  let resumeAt = null;
+  if (atSeconds === null) {
+    try {
+      const positions = JSON.parse(localStorage.getItem("tmp_positions") || "{}");
+      if (positions[ep] > 5) resumeAt = positions[ep];
+    } catch { /* ignore */ }
+  }
   const head = `
     <a class="back-link" href="#episodes">&larr; all episodes</a>
     <div class="ep-head">
@@ -351,46 +598,72 @@ async function renderEpisodePage(ep, atSeconds = null) {
     <div class="listen-box">
       <a class="btn-primary" href="${archiveLink}" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg> Listen on archive.org</a>
       <span>Audio lives on the Internet Archive — tap any timestamp to play from that line, right here.</span>
-    </div>`;
+    </div>
+    ${resumeAt ? `<button id="resume-btn" class="btn-plain resume-btn" type="button">▶ Resume from ${fmtTime(resumeAt)}</button>` : ""}
+    ${clipEndSeconds != null && atSeconds != null ? `<button id="play-clip-btn" class="btn-primary resume-btn" type="button">▶ Play this clip (${fmtTime(atSeconds)}–${fmtTime(clipEndSeconds)})</button>` : ""}`;
   if (meta.shard === undefined) {
     root.innerHTML = head + `<div class="empty"><span class="big">Not transcribed yet.</span>
       This one is still in the queue. The audio link above works right now.</div>`;
     return;
   }
   root.innerHTML = head + `<div class="skeleton"></div><div class="skeleton"></div>`;
+  $("#resume-btn")?.addEventListener("click", () => playMoment(ep, resumeAt));
+  $("#play-clip-btn")?.addEventListener("click", () => playMoment(ep, atSeconds, clipEndSeconds));
   await loadShards();
   const sh = state.shards.get(meta.shard);
   const rows = sh?.eps[String(ep)] || [];
   const legend = (meta.speakers || []).map((s) => isNamedSpeaker(s)
     ? `<a class="${speakerClass(s)}" href="#cast/${encodeURIComponent(s)}">● ${esc(s)}</a>`
     : `<span class="${speakerClass(s)}">● ${esc(s)}</span>`).join("");
-  let html = head + `<div class="speaker-legend">${legend}</div><div class="transcript">`;
-  for (const [start, spkIdx, text] of rows) {
-    const name = sh.speakers[spkIdx] || "Unknown";
-    html += `<div class="line">
-      <a class="ts" href="${momentHash(ep, start)}" data-start="${start}"
-         title="play from ${fmtTime(start)} — or copy this link to share the moment">${fmtTime(start)}</a>
-      <p><span class="quote-speaker ${speakerClass(name)}">${esc(name)}:</span>${esc(text)}</p>
-    </div>`;
-  }
-  root.innerHTML = html + "</div>";
-  const lineEls = [...root.querySelectorAll(".line")];
-  state.epPageLines = rows.map((r, i) => ({ start: r[0], el: lineEls[i] }));
-  state.epPageEp = ep;
-  root.querySelectorAll(".ts").forEach((a) =>
-    a.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      // shareable URL without a re-render (hashchange would rebuild the page)
-      history.replaceState(null, "", momentHash(ep, Number(a.dataset.start)));
-      playMoment(ep, Number(a.dataset.start));
-    }));
-  if (atSeconds !== null) {
-    const idx = lineIndexAt(state.epPageLines, atSeconds);
-    if (idx >= 0) {
-      lineEls[idx].classList.add("line-target");
-      lineEls[idx].scrollIntoView({ block: "center" });
+  root.innerHTML = head + `<div class="speaker-legend">${legend}</div><div class="transcript" id="ep-transcript"></div>`;
+  const container = $("#ep-transcript");
+  const myToken = ++epRenderToken; // guard against a stale chunked render finishing after the user navigated away
+  const lineEls = new Array(rows.length);
+
+  // build in chunks off a single big innerHTML string so a long episode
+  // doesn't block the main thread / jank mobile scrolling on first paint
+  const CHUNK = 60;
+  let idx = 0;
+  function renderChunk() {
+    if (myToken !== epRenderToken) return; // navigated away mid-render
+    if (!document.body.contains(container)) return;
+    const frag = document.createDocumentFragment();
+    const end = Math.min(rows.length, idx + CHUNK);
+    for (; idx < end; idx++) {
+      const [start, spkIdx, text] = rows[idx];
+      const name = sh.speakers[spkIdx] || "Unknown";
+      const div = document.createElement("div");
+      div.className = "line";
+      div.innerHTML = `<a class="ts" href="${momentHash(ep, start)}" data-start="${start}"
+           title="play from ${fmtTime(start)} — or copy this link to share the moment">${fmtTime(start)}</a>
+        <p><span class="quote-speaker ${speakerClass(name)}">${esc(name)}:</span>${esc(text)}</p>`;
+      div.querySelector(".ts").addEventListener("click", (ev) => {
+        ev.preventDefault();
+        history.replaceState(null, "", momentHash(ep, start));
+        playMoment(ep, start);
+      });
+      frag.appendChild(div);
+      lineEls[idx - 1] = div;
+    }
+    container.appendChild(frag);
+    if (idx < rows.length) {
+      requestAnimationFrame(renderChunk);
+    } else {
+      finishRender();
     }
   }
+  function finishRender() {
+    state.epPageLines = rows.map((r, i) => ({ start: r[0], el: lineEls[i] }));
+    state.epPageEp = ep;
+    if (atSeconds !== null) {
+      const at = lineIndexAt(state.epPageLines, atSeconds);
+      if (at >= 0 && lineEls[at]) {
+        lineEls[at].classList.add("line-target");
+        lineEls[at].scrollIntoView({ block: "center" });
+      }
+    }
+  }
+  renderChunk();
 }
 
 /* index of the last line starting at or before t (binary search) */
@@ -422,11 +695,49 @@ function onTimeUpdate() {
   }
 }
 
+/* highlight the matching context line inside any expanded search-result
+   context box for the episode currently playing, so following-along works
+   from the search results view too, not just the full episode page */
+function highlightPlayingContext() {
+  const audio = $("#player-audio");
+  const t = audio.currentTime;
+  document.querySelectorAll(`.result[data-ep="${state.playingEp}"] .result-context`).forEach((box) => {
+    let best = null, bestDelta = Infinity;
+    box.querySelectorAll(".ctx-line[data-start]").forEach((el) => {
+      const s = Number(el.dataset.start);
+      const delta = t - s;
+      if (delta >= -0.25 && delta < bestDelta) { bestDelta = delta; best = el; }
+    });
+    box.querySelectorAll(".ctx-line").forEach((el) => el.classList.toggle("now-playing", el === best));
+  });
+}
+
+let lastPositionSave = 0;
+function onPlayerTimeUpdate() {
+  const audio = $("#player-audio");
+  onTimeUpdate();
+  highlightPlayingContext();
+  if (state.clipEnd != null && audio.currentTime >= state.clipEnd) {
+    audio.pause();
+    audio.currentTime = state.clipEnd;
+  }
+  // remember playback position per episode so a visitor can resume later
+  const now = Date.now();
+  if (state.playingEp != null && now - lastPositionSave > 4000) {
+    lastPositionSave = now;
+    try {
+      const positions = JSON.parse(localStorage.getItem("tmp_positions") || "{}");
+      positions[state.playingEp] = audio.currentTime;
+      localStorage.setItem("tmp_positions", JSON.stringify(positions));
+    } catch { /* storage unavailable/full — resume just won't work this session */ }
+  }
+}
+
 /* ---------- cast ---------- */
 
 async function loadStats() {
   if (state.stats) return state.stats;
-  const res = await fetch("data/stats.json", { cache: "no-cache" });
+  const res = await fetch("data/stats.json");
   state.stats = res.ok ? await res.json() : { talk: {}, talkByEp: {} };
   return state.stats;
 }
@@ -569,14 +880,32 @@ async function randomBit() {
   labelEl.textContent = "rolling…";
   try {
     await loadShards();
-    const all = [];
+    // pick from lines that are actually good demo material — a real (named)
+    // speaker saying more than a few words, not a one-word fragment or an
+    // unidentified "Speaker A" aside. Falls back to any line if that pool
+    // is somehow empty.
+    const good = [];
     for (const sh of state.shards.values())
-      for (const ep of Object.keys(sh.eps)) all.push({ ep: +ep, n: sh.eps[ep].length, sh });
-    const pick = all[Math.floor(Math.random() * all.length)];
-    const i = Math.floor(Math.random() * pick.n);
-    const start = pick.sh.eps[pick.ep][i][0];
-    location.hash = momentHash(pick.ep, start);
-    playMoment(pick.ep, start);
+      for (const [ep, rows] of Object.entries(sh.eps))
+        for (let i = 0; i < rows.length; i++) {
+          const [start, spkIdx, text] = rows[i];
+          const name = sh.speakers[spkIdx] || "Unknown";
+          if (isNamedSpeaker(name) && text.split(/\s+/).length >= 6) good.push({ ep: +ep, start });
+        }
+    let ep, start;
+    if (good.length) {
+      const pick = good[Math.floor(Math.random() * good.length)];
+      ({ ep, start } = pick);
+    } else {
+      const all = [];
+      for (const sh of state.shards.values())
+        for (const epId of Object.keys(sh.eps)) all.push({ ep: +epId, n: sh.eps[epId].length, sh });
+      const pick = all[Math.floor(Math.random() * all.length)];
+      const i = Math.floor(Math.random() * pick.n);
+      ep = pick.ep; start = pick.sh.eps[pick.ep][i][0];
+    }
+    location.hash = momentHash(ep, start);
+    playMoment(ep, start);
   } finally {
     btn.disabled = false;
     labelEl.textContent = label;
@@ -668,8 +997,16 @@ async function loadRecentSearches() {
       .limit(RECENT_SEARCHES_LIMIT);
     if (error) throw error;
     const clean = data.filter((e) => !containsSlur(e.q));
-    if (!clean.length) { box.hidden = true; return; }
-    list.innerHTML = clean.map((e) =>
+    // dedupe consecutive/repeat queries so a popular search doesn't spam the list
+    const seen = new Set();
+    const deduped = clean.filter((e) => {
+      const k = e.q.toLowerCase().trim();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    if (!deduped.length) { box.hidden = true; return; }
+    list.innerHTML = deduped.map((e) =>
       `<li><a href="#search?q=${encodeURIComponent(e.q)}">${esc(e.q)}</a></li>`).join("");
     box.hidden = false;
   } catch {
@@ -680,8 +1017,20 @@ async function loadRecentSearches() {
 function startRecentSearchesPolling() {
   loadRecentSearches();
   clearInterval(recentSearchesTimer);
+  // don't poll a hidden tab — saves the request and avoids a layout jump
+  // the visitor never sees
+  if (document.hidden) return;
   recentSearchesTimer = setInterval(loadRecentSearches, 30000);
 }
+
+document.addEventListener("visibilitychange", () => {
+  const onSearchTab = !$("#view-search").hidden && !location.hash.includes("?");
+  if (document.hidden) {
+    clearInterval(recentSearchesTimer);
+  } else if (onSearchTab) {
+    startRecentSearchesPolling();
+  }
+});
 
 /* ---------- routing ---------- */
 
@@ -703,13 +1052,17 @@ function route() {
   });
   if (epMatch) {
     const t = params.get("t");
-    renderEpisodePage(Number(epMatch[1]), t !== null ? Number(t) : null);
+    const e = params.get("e");
+    renderEpisodePage(Number(epMatch[1]), t !== null ? Number(t) : null, e !== null ? Number(e) : null);
   }
   if (castMatch) {
     const name = castMatch[1] ? decodeURIComponent(castMatch[1]) : null;
     name ? renderCastPage(name) : renderCastIndex();
   }
-  if (tab === "episodes") renderEpisodes($("#ep-filter").value);
+  if (tab === "episodes") {
+    episodesPendingOnly = params.get("pending") === "1";
+    renderEpisodes($("#ep-filter").value, episodesPendingOnly);
+  }
   if (tab === "stats") renderStats();
   if (tab === "day") renderDay();
   if (tab === "search" && qs) {
@@ -736,7 +1089,7 @@ const TAGLINES = ["Chad shuts up", "the pineapple gets profiled", "Bryan does th
 async function setTagline() {
   const el = $("#tagline-blank");
   try {
-    const res = await fetch("data/taglines.json", { cache: "no-cache" });
+    const res = await fetch("data/taglines.json");
     const lines = await res.json();
     const [ep, start, name, text] = lines[Math.floor(Math.random() * lines.length)];
     const short = name.split(" ")[0];
@@ -753,15 +1106,63 @@ async function boot() {
     `<li><a href="#search?q=${encodeURIComponent(p)}">&ldquo;${esc(p)}&rdquo;</a></li>`).join("");
   $("#search-form").addEventListener("submit", onSearch);
   $("#spk").addEventListener("change", () => state.query && onSearch());
+  // once the corpus is in memory (after the first search), typing searches
+  // live — no need to hit enter again
+  let liveSearchDebounce = null;
+  $("#q").addEventListener("input", (e) => {
+    if (!state.shards.size) return; // first search still needs the explicit submit to kick off loading
+    const q = e.target.value.trim();
+    clearTimeout(liveSearchDebounce);
+    liveSearchDebounce = setTimeout(() => {
+      if (q.length < 2) return;
+      state.query = q;
+      // replaceState, not location.hash= — a hash assignment pushes a new
+      // history entry per keystroke, which would wreck the back button
+      history.replaceState(null, "", `#search?q=${encodeURIComponent(q)}` +
+        ($("#spk").value ? `&spk=${encodeURIComponent($("#spk").value)}` : ""));
+      executeSearch();
+      logSearch(q);
+      $("#recent-searches").hidden = true;
+      $("#try-box").hidden = true;
+      clearInterval(recentSearchesTimer);
+    }, 200);
+  });
   $("#more-btn").addEventListener("click", () => renderResults(false));
   $("#player-close").addEventListener("click", closePlayer);
   // If a stream errors out, forget the src so the next click starts clean.
   $("#player-audio").addEventListener("error", (e) => {
     delete e.target.dataset.src;
   });
-  $("#ep-filter").addEventListener("input", (e) => renderEpisodes(e.target.value));
+  $("#ep-filter").addEventListener("input", (e) => renderEpisodes(e.target.value, episodesPendingOnly));
   $("#random-btn").addEventListener("click", randomBit);
-  $("#player-audio").addEventListener("timeupdate", onTimeUpdate);
+  $("#player-audio").addEventListener("timeupdate", onPlayerTimeUpdate);
+  $("#player-back").addEventListener("click", () => {
+    $("#player-audio").currentTime = Math.max(0, $("#player-audio").currentTime - 15);
+  });
+  $("#player-fwd").addEventListener("click", () => {
+    $("#player-audio").currentTime += 15;
+  });
+  $("#player-speed").addEventListener("change", (e) => {
+    const rate = Number(e.target.value);
+    state.playbackRate = rate;
+    $("#player-audio").playbackRate = rate;
+    try { localStorage.setItem("tmp_playback_rate", String(rate)); } catch { /* ignore */ }
+  });
+  $("#player-clip-btn").addEventListener("click", async () => {
+    const audio = $("#player-audio");
+    if (state.playingEp == null || state.playingStart == null) return;
+    const end = audio.currentTime;
+    if (end <= state.playingStart + 1) return;
+    state.clipEnd = end;
+    const link = `${location.origin}${location.pathname}${momentHash(state.playingEp, state.playingStart, end)}`;
+    history.replaceState(null, "", momentHash(state.playingEp, state.playingStart, end));
+    const ok = await copyToClipboard(link);
+    flashCopyButton($("#player-clip-btn"), ok, "clip this");
+  });
+  try {
+    const savedRate = Number(localStorage.getItem("tmp_playback_rate"));
+    if (savedRate) { state.playbackRate = savedRate; $("#player-speed").value = String(savedRate); }
+  } catch { /* ignore */ }
   window.addEventListener("hashchange", route);
   try {
     await loadCatalog();

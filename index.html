@@ -87,6 +87,7 @@
       <label class="visually-hidden" for="ep-filter">Filter episodes by title or number</label>
       <input id="ep-filter" type="search" placeholder="filter by title or number&hellip;" autocomplete="off">
     </div>
+    <p id="ep-pending-banner" class="ep-pending-banner" hidden></p>
     <ul id="ep-list" class="ep-list"></ul>
   </section>
 
@@ -118,7 +119,19 @@
     <a id="player-ep" href="#"></a>
     <span id="player-at" class="timestamp"></span>
   </div>
-  <audio id="player-audio" controls preload="none"></audio>
+  <div class="player-controls">
+    <button id="player-back" class="btn-plain player-skip" type="button" title="back 15 seconds">⟲15</button>
+    <audio id="player-audio" controls preload="none"></audio>
+    <button id="player-fwd" class="btn-plain player-skip" type="button" title="forward 15 seconds">15⟳</button>
+    <select id="player-speed" class="player-speed" title="playback speed" aria-label="Playback speed">
+      <option value="0.75">0.75x</option>
+      <option value="1" selected>1x</option>
+      <option value="1.25">1.25x</option>
+      <option value="1.5">1.5x</option>
+      <option value="2">2x</option>
+    </select>
+    <button id="player-clip-btn" class="btn-plain" type="button" title="copy a clip link from the start point to right now">clip this</button>
+  </div>
   <label class="follow-toggle" title="Highlight the transcript line as it plays">
     <input type="checkbox" id="player-follow" checked> follow
   </label>
