@@ -74,7 +74,7 @@ function playMoment(ep, seconds, clipEndSeconds = null) {
   const audio = $("#player-audio");
   bar.hidden = false;
   document.body.classList.add("has-player");
-  $("#player-ep").textContent = `Ep ${ep} — ${m.title}`;
+  $("#player-ep").textContent = `Ep ${ep}: ${m.title}`;
   $("#player-ep").href = `#ep/${ep}`;
   $("#player-at").textContent = clipEndSeconds != null
     ? `clip ${fmtTime(seconds)}–${fmtTime(clipEndSeconds)}` : `from ${fmtTime(seconds)}`;
@@ -151,7 +151,7 @@ function downloadQuoteImage({ text, name, ep, title }) {
   wrapText(ctx, `“${text}”`, 36, 190, W - 72, 54);
   ctx.font = "24px Verdana, sans-serif";
   ctx.fillStyle = "#3f4f78";
-  ctx.fillText(`— ${name}, Ep ${ep}${title ? ` · ${title}` : ""}`, 36, H - 44);
+  ctx.fillText(`${name} · Ep ${ep}${title ? ` · ${title}` : ""}`, 36, H - 44);
   canvas.toBlob((blob) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -190,7 +190,7 @@ const fmtDate = (iso) => {
 
 async function loadCatalog() {
   const res = await fetch("data/episodes.json");
-  if (!res.ok) throw new Error("episodes.json missing — run scripts/build_index.py");
+  if (!res.ok) throw new Error("episodes.json missing: run scripts/build_index.py");
   state.episodes = await res.json();
   for (const e of state.episodes) {
     state.byEp.set(e.ep, e);
@@ -200,10 +200,14 @@ async function loadCatalog() {
   const counterText = `<svg class="icon" aria-hidden="true"><use href="#i-tape"/></svg>` +
     `${done} of ${state.episodes.length} episodes transcribed`;
   $("#counter").innerHTML = done < state.episodes.length
-    ? `<a href="#episodes?pending=1" class="counter-link">${counterText} — see what's left</a>`
+    ? `<a href="#episodes?pending=1" class="counter-link">${counterText} · see what's left</a>`
     : counterText;
+  // only offer real names in the "said by" filter — "Speaker A" is a
+  // different anonymous voice in every episode, so filtering by it
+  // globally would be meaningless
   const speakers = new Set();
-  for (const e of state.episodes) (e.speakers || []).forEach((s) => speakers.add(s));
+  for (const e of state.episodes)
+    (e.speakers || []).filter(isNamedSpeaker).forEach((s) => speakers.add(s));
   const sel = $("#spk");
   [...speakers].sort().forEach((s) => {
     const o = document.createElement("option");
@@ -271,6 +275,76 @@ function wordVariants(w) {
   return VARIANT_OF.get(w) || [w];
 }
 
+/* ---- typo tier: real edit-distance matching ----
+   When the substring tiers find nothing, each query word is compared against
+   the corpus's own vocabulary with Levenshtein edit distance, so "diapper"
+   finds "diaper" and "pinapple" finds "pineapple". This catches both user
+   typos and Whisper mistranscriptions. */
+
+/* how many letter-errors we forgive, scaled by word length */
+const typoTolerance = (w) => (w.length <= 4 ? 1 : w.length <= 8 ? 2 : 3);
+
+/* banded Levenshtein with early exit once the distance can't come back
+   under `max` — cheap enough to run against the whole vocabulary */
+function editDistance(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = new Array(b.length + 1);
+  let curr = new Array(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+      if (curr[j] < rowMin) rowMin = curr[j];
+    }
+    if (rowMin > max) return max + 1;
+    [prev, curr] = [curr, prev];
+  }
+  return prev[b.length];
+}
+
+/* every distinct word in the loaded transcripts, with its frequency —
+   built once and reused until more shards arrive */
+let vocabCache = null;
+function corpusVocab() {
+  if (vocabCache && vocabCache.shardCount === state.shards.size) return vocabCache.words;
+  const words = new Map();
+  for (const sh of state.shards.values())
+    for (const rows of Object.values(sh.eps))
+      for (const r of rows)
+        for (const w of r[3].split(/[^a-z0-9']+/))
+          if (w.length > 2) words.set(w, (words.get(w) || 0) + 1);
+  vocabCache = { shardCount: state.shards.size, words };
+  return words;
+}
+
+/* nearest real corpus words for one (possibly misspelled) query word */
+function closeSpellings(w) {
+  const tol = typoTolerance(w);
+  const found = [];
+  for (const [cand, count] of corpusVocab()) {
+    if (cand === w) continue;
+    const d = editDistance(w, cand, tol);
+    if (d <= tol) found.push({ cand, d, count });
+  }
+  found.sort((a, b) => a.d - b.d || b.count - a.count);
+  return found.slice(0, 8).map((x) => x.cand);
+}
+
+/* query word -> [original + name-soundalikes + close spellings] */
+let lastTypoVariants = new Map();
+function expandQueryWords(words) {
+  const map = new Map();
+  for (const w of words) {
+    const variants = new Set(wordVariants(w));
+    if (w.length > 2) for (const v of closeSpellings(w)) variants.add(v);
+    map.set(w, [...variants]);
+  }
+  return map;
+}
+
 /* does `haystack` contain any spelling variant of word `w`? */
 function includesVariant(haystack, w) {
   for (const v of wordVariants(w)) if (haystack.includes(v)) return true;
@@ -314,22 +388,51 @@ function runSearch(qRaw, who) {
     hits.sort((a, b) => b.score - a.score);
     return { hits, mode: "exact" };
   }
-  if (words.length < 2) return { hits, mode: "exact" };
+  if (!words.length) return { hits, mode: "exact" };
   // pass 2: all words present in segment (looser, catches whisper mishears less),
   // with name/soundalike variants tried in both directions
-  for (const seg of iterSegments()) {
-    const row = seg.rows[seg.i];
-    if (who && seg.speakers[row[1]] !== who) continue;
-    if (words.every((w) => includesVariant(row[3], w))) hits.push({ ...seg, exact: false, spans: false });
-  }
-  if (hits.length) {
-    for (const h of hits) {
-      const name = h.speakers[h.rows[h.i][1]] || "Unknown";
-      h.score = relevanceScore(h.rows[h.i][3], name, words.length);
+  if (words.length >= 2) {
+    for (const seg of iterSegments()) {
+      const row = seg.rows[seg.i];
+      if (who && seg.speakers[row[1]] !== who) continue;
+      if (words.every((w) => includesVariant(row[3], w))) hits.push({ ...seg, exact: false, spans: false });
     }
-    hits.sort((a, b) => b.score - a.score);
-    return { hits, mode: "loose" };
+    if (hits.length) {
+      for (const h of hits) {
+        const name = h.speakers[h.rows[h.i][1]] || "Unknown";
+        h.score = relevanceScore(h.rows[h.i][3], name, words.length);
+      }
+      hits.sort((a, b) => b.score - a.score);
+      return { hits, mode: "loose" };
+    }
   }
+  // pass 2.5: typo tier — every word must appear as itself OR a close spelling
+  // (edit distance against the corpus vocabulary). Single-word queries land
+  // here too, so a lone misspelled word no longer dead-ends.
+  lastTypoVariants = expandQueryWords(words);
+  let anyNewSpelling = false;
+  lastTypoVariants.forEach((vs, w) => { if (vs.length > wordVariants(w).length) anyNewSpelling = true; });
+  if (anyNewSpelling) {
+    for (const seg of iterSegments()) {
+      const row = seg.rows[seg.i];
+      if (who && seg.speakers[row[1]] !== who) continue;
+      if (words.every((w) => lastTypoVariants.get(w).some((v) => row[3].includes(v)))) {
+        // lines that contain more of the words as actually typed should
+        // outrank lines that only match via corrected spellings
+        const asTyped = words.filter((w) => includesVariant(row[3], w)).length;
+        hits.push({ ...seg, exact: false, spans: false, asTyped });
+      }
+    }
+    if (hits.length) {
+      for (const h of hits) {
+        const name = h.speakers[h.rows[h.i][1]] || "Unknown";
+        h.score = h.asTyped * 2 + relevanceScore(h.rows[h.i][3], name, words.length);
+      }
+      hits.sort((a, b) => b.score - a.score);
+      return { hits, mode: "typo" };
+    }
+  }
+  if (words.length < 2) return { hits, mode: "exact" };
   // pass 3: fuzzy — most (not all) query words present, so a wrong word
   // ("bag of snakes" vs "barrel of snakes") doesn't sink the whole search.
   // Ranked by how many words matched, then by relevance.
@@ -369,7 +472,8 @@ function highlight(text, q, mode) {
   }
   let out = esc(text);
   for (const w of q.toLowerCase().split(/\s+/).filter((w) => w.length > 1)) {
-    for (const v of wordVariants(w)) {
+    const variants = mode === "typo" ? (lastTypoVariants.get(w) || wordVariants(w)) : wordVariants(w);
+    for (const v of variants) {
       out = out.replace(new RegExp(`(${v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "ig"),
         "<mark>$1</mark>");
     }
@@ -399,14 +503,14 @@ function buildResultRow(hit) {
   li.innerHTML = `
     <button class="result-quote" aria-expanded="false" title="show surrounding lines">
       <span class="quote-speaker ${speakerClass(name)}">${esc(name)}:</span>
-      <span class="quote-text">&ldquo;${highlight(displayText, state.query, hit.mode)}&rdquo;${hit.spans ? ' <span class="spans-note">(continues into next line)</span>' : ""}</span>
+      <span class="quote-text">&ldquo;${highlight(displayText, state.query, hit.mode || state.searchMode)}&rdquo;${hit.spans ? ' <span class="spans-note">(continues into next line)</span>' : ""}</span>
     </button>
     <div class="result-meta">
-      <a class="ep-link" href="#ep/${hit.ep}">Ep ${hit.ep} — ${esc(meta?.title || "")}</a>
+      <a class="ep-link" href="#ep/${hit.ep}">Ep ${hit.ep}: ${esc(meta?.title || "")}</a>
       ${meta?.date ? `<span>${fmtDate(meta.date)}</span>` : ""}
       <span class="timestamp">${fmtTime(start)}</span>
       <a class="play-link" href="${playUrl(hit.ep, start)}" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg> play this moment</a>
-      <a class="moment-link" href="${momentHash(hit.ep, start)}" title="permalink to this moment — copy the address to share it"><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg> link</a>
+      <a class="moment-link" href="${momentHash(hit.ep, start)}" title="permalink to this moment. Copy the address to share it."><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg> link</a>
       <button class="copy-quote-btn btn-plain" type="button" title="copy this quote as text"><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg> copy quote</button>
       <button class="quote-img-btn btn-plain" type="button" title="save a shareable quote image">quote image</button>
     </div>`;
@@ -419,7 +523,7 @@ function buildResultRow(hit) {
   li.querySelector(".copy-quote-btn").addEventListener("click", async (ev) => {
     ev.stopPropagation();
     const btn = ev.currentTarget;
-    const ok = await copyToClipboard(`"${displayText}" — ${name}, Ep ${hit.ep}${meta?.title ? ` (${meta.title})` : ""} ${location.origin}${location.pathname}${momentHash(hit.ep, start)}`);
+    const ok = await copyToClipboard(`"${displayText}" (${name}, Ep ${hit.ep}${meta?.title ? `: ${meta.title}` : ""}) ${location.origin}${location.pathname}${momentHash(hit.ep, start)}`);
     flashCopyButton(btn, ok, "copy quote");
   });
   li.querySelector(".quote-img-btn").addEventListener("click", (ev) => {
@@ -496,16 +600,16 @@ function executeSearch() {
   const done = state.episodes.filter((e) => e.shard !== undefined).length;
   const loaded = state.shards.size, total = state.shardIds.size;
   const stillLoading = loaded < total
-    ? ` <span class="loading-more">— still loading ${total - loaded} more shard${total - loaded === 1 ? "" : "s"}…</span>` : "";
+    ? ` <span class="loading-more">· still loading ${total - loaded} more shard${total - loaded === 1 ? "" : "s"}…</span>` : "";
   if (mode === "suggest" || !hits.length) {
     $("#results").innerHTML = "";
     $("#search-more").hidden = true;
     document.querySelectorAll(".did-you-mean").forEach((el) => el.remove());
     const suggestions = mode === "suggest" ? hits : [];
     status.innerHTML = `<div class="empty"><span class="big">No dice.</span>
-      Searched ${done} transcribed episodes. Try fewer or different words —
-      the robot transcriber occasionally mishears names.
-      ${done < state.episodes.length ? `<br>(${state.episodes.length - done} episodes still await transcription — it might be in one of those.)` : ""}${stillLoading}</div>`;
+      Searched ${done} transcribed episodes. Try fewer or different words.
+      The robot transcriber occasionally mishears names.
+      ${done < state.episodes.length ? `<br>(${state.episodes.length - done} episodes still await transcription. It might be in one of those.)` : ""}${stillLoading}</div>`;
     if (suggestions.length) {
       const box = document.createElement("div");
       box.className = "did-you-mean";
@@ -521,9 +625,11 @@ function executeSearch() {
   }
   document.querySelectorAll(".did-you-mean").forEach((el) => el.remove());
   state.results = hits;
+  state.searchMode = mode;
   status.innerHTML = `<strong>${hits.length}</strong> ${mode !== "exact" ? "close " : ""}hit${hits.length === 1 ? "" : "s"} across ${done} transcribed episodes` +
-    (mode === "loose" ? " (no exact match — showing lines containing all your words, best matches first)"
-      : mode === "fuzzy" ? " (fuzzy match — showing lines containing most of your words, best matches first)" : "") + stillLoading;
+    (mode === "loose" ? " (no exact match: showing lines containing all your words, best matches first)"
+      : mode === "typo" ? " (no exact match: showing lines with close spellings of your words, best matches first)"
+      : mode === "fuzzy" ? " (fuzzy match: showing lines containing most of your words, best matches first)" : "") + stillLoading;
   renderResults(true);
 }
 
@@ -567,7 +673,7 @@ function renderEpisodes(filter = "", pendingOnly = false) {
     }
   }
   if (!list.children.length)
-    list.innerHTML = `<div class="empty"><span class="big">${pendingOnly ? "Nothing pending — it's all transcribed." : "No episode matches."}</span></div>`;
+    list.innerHTML = `<div class="empty"><span class="big">${pendingOnly ? "Nothing pending. It's all transcribed." : "No episode matches."}</span></div>`;
 }
 
 /* ---------- episode page ---------- */
@@ -597,7 +703,7 @@ async function renderEpisodePage(ep, atSeconds = null, clipEndSeconds = null) {
     </div>
     <div class="listen-box">
       <a class="btn-primary" href="${archiveLink}" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg> Listen on archive.org</a>
-      <span>Audio lives on the Internet Archive — tap any timestamp to play from that line, right here.</span>
+      <span>Audio lives on the Internet Archive. Tap any timestamp to play from that line, right here.</span>
     </div>
     ${resumeAt ? `<button id="resume-btn" class="btn-plain resume-btn" type="button">▶ Resume from ${fmtTime(resumeAt)}</button>` : ""}
     ${clipEndSeconds != null && atSeconds != null ? `<button id="play-clip-btn" class="btn-primary resume-btn" type="button">▶ Play this clip (${fmtTime(atSeconds)}–${fmtTime(clipEndSeconds)})</button>` : ""}`;
@@ -635,7 +741,7 @@ async function renderEpisodePage(ep, atSeconds = null, clipEndSeconds = null) {
       const div = document.createElement("div");
       div.className = "line";
       div.innerHTML = `<a class="ts" href="${momentHash(ep, start)}" data-start="${start}"
-           title="play from ${fmtTime(start)} — or copy this link to share the moment">${fmtTime(start)}</a>
+           title="play from ${fmtTime(start)}, or copy this link to share the moment">${fmtTime(start)}</a>
         <p><span class="quote-speaker ${speakerClass(name)}">${esc(name)}:</span>${esc(text)}</p>`;
       div.querySelector(".ts").addEventListener("click", (ev) => {
         ev.preventDefault();
@@ -643,11 +749,14 @@ async function renderEpisodePage(ep, atSeconds = null, clipEndSeconds = null) {
         playMoment(ep, start);
       });
       frag.appendChild(div);
-      lineEls[idx - 1] = div;
+      lineEls[idx] = div;
     }
     container.appendChild(frag);
     if (idx < rows.length) {
-      requestAnimationFrame(renderChunk);
+      // rAF pauses in hidden tabs, which would strand a permalink opened in
+      // a background tab at the first chunk — fall back to a timer there
+      if (document.hidden) setTimeout(renderChunk, 16);
+      else requestAnimationFrame(renderChunk);
     } else {
       finishRender();
     }
@@ -656,7 +765,12 @@ async function renderEpisodePage(ep, atSeconds = null, clipEndSeconds = null) {
     state.epPageLines = rows.map((r, i) => ({ start: r[0], el: lineEls[i] }));
     state.epPageEp = ep;
     if (atSeconds !== null) {
-      const at = lineIndexAt(state.epPageLines, atSeconds);
+      // ?t= was floored to a whole second when the link was made, so aim for
+      // the middle of that second and take whichever line starts closest
+      const target = atSeconds + 0.5;
+      let at = Math.max(0, lineIndexAt(state.epPageLines, target));
+      const next = state.epPageLines[at + 1];
+      if (next && Math.abs(next.start - target) < Math.abs(state.epPageLines[at].start - target)) at++;
       if (at >= 0 && lineEls[at]) {
         lineEls[at].classList.add("line-target");
         lineEls[at].scrollIntoView({ block: "center" });
@@ -773,7 +887,7 @@ async function renderCastIndex() {
     </li>`;
   }
   html += `</ul>
-    <p class="ep-sub">Plus ${fmtHours(unnamedSecs)} from voices the matcher couldn't name —
+    <p class="ep-sub">Plus ${fmtHours(unnamedSecs)} from voices the matcher couldn't name:
     one-off characters, guests, and bits (they stay "Speaker A/B/…" until identified).</p>`;
   root.innerHTML = html;
 }
@@ -841,9 +955,9 @@ async function renderStats() {
     <h3 class="stats-h">The "ten minute" audit</h3>
     <p>Average episode: <strong>${fmtTime(avg)}</strong> across ${durs.length} episodes.
        ${overTen.length} of them (${Math.round((overTen.length / durs.length) * 100)}%) blew past eleven minutes.
-       Longest lie: <a href="#ep/${longest.ep}">Ep ${longest.ep} — ${esc(longest.title)}</a>
+       Longest lie: <a href="#ep/${longest.ep}">Ep ${longest.ep}: ${esc(longest.title)}</a>
        at <strong>${fmtTime(longest.duration)}</strong>. Shortest:
-       <a href="#ep/${shortest.ep}">Ep ${shortest.ep} — ${esc(shortest.title)}</a> at ${fmtTime(shortest.duration)}.</p>
+       <a href="#ep/${shortest.ep}">Ep ${shortest.ep}: ${esc(shortest.title)}</a> at ${fmtTime(shortest.duration)}.</p>
     <h3 class="stats-h">Catchphrase counter</h3>
     <p class="ep-sub">How often it got said across every transcript. Tap a phrase to see every hit.</p>
     <div id="phrase-body"><button id="phrase-btn" class="btn-plain"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg> tally the catchphrases
@@ -918,12 +1032,12 @@ function renderDay() {
   const now = new Date();
   const mmdd = `${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   const withDates = state.episodes.filter((e) => e.date);
-  $("#day-title").textContent = `This day in TMP — ${now.toLocaleDateString("en-US", { month: "long", day: "numeric" })}`;
+  $("#day-title").textContent = `This day in TMP: ${now.toLocaleDateString("en-US", { month: "long", day: "numeric" })}`;
   const body = $("#day-body");
   if (!withDates.length) {
     body.innerHTML = `<div class="empty"><span class="big">Air dates aren't loaded yet.</span>
       Once episode air dates are added to the archive, this tab shows every episode
-      released on today's date — "10 years ago today" and all that.</div>`;
+      released on today's date: "10 years ago today" and all that.</div>`;
     return;
   }
   const todays = withDates.filter((e) => e.date.slice(5) === mmdd);
@@ -997,11 +1111,16 @@ async function loadRecentSearches() {
       .limit(RECENT_SEARCHES_LIMIT);
     if (error) throw error;
     const clean = data.filter((e) => !containsSlur(e.q));
-    // dedupe consecutive/repeat queries so a popular search doesn't spam the list
+    // dedupe repeat queries so a popular search doesn't spam the list, and
+    // drop half-typed prefixes of a query that appears in fuller form
+    // ("and they will sa" when "and they will say no" is also on the list —
+    // rows logged per-keystroke before the settle delay existed)
     const seen = new Set();
-    const deduped = clean.filter((e) => {
-      const k = e.q.toLowerCase().trim();
+    const keys = clean.map((e) => e.q.toLowerCase().trim());
+    const deduped = clean.filter((e, i) => {
+      const k = keys[i];
       if (seen.has(k)) return false;
+      if (keys.some((other, j) => j !== i && other.length > k.length && other.startsWith(k))) return false;
       seen.add(k);
       return true;
     });
@@ -1093,7 +1212,7 @@ async function setTagline() {
     const lines = await res.json();
     const [ep, start, name, text] = lines[Math.floor(Math.random() * lines.length)];
     const short = name.split(" ")[0];
-    el.innerHTML = `<a href="${momentHash(ep, start)}" title="Ep ${ep} — hear it">` +
+    el.innerHTML = `<a href="${momentHash(ep, start)}" title="Ep ${ep}: hear it">` +
       `${esc(short)} says &ldquo;${esc(text.replace(/[.?!]$/, ""))}&rdquo;</a>?`;
   } catch {
     el.textContent = TAGLINES[Math.floor(Math.random() * TAGLINES.length)] + "?";
@@ -1105,6 +1224,11 @@ async function boot() {
   $("#try-list").innerHTML = CATCHPHRASES.map((p) =>
     `<li><a href="#search?q=${encodeURIComponent(p)}">&ldquo;${esc(p)}&rdquo;</a></li>`).join("");
   $("#search-form").addEventListener("submit", onSearch);
+  // belt-and-suspenders: some embedded browsers don't fire implicit form
+  // submission for Enter in a search field
+  $("#q").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); onSearch(); }
+  });
   $("#spk").addEventListener("change", () => state.query && onSearch());
   // once the corpus is in memory (after the first search), typing searches
   // live — no need to hit enter again
@@ -1121,12 +1245,24 @@ async function boot() {
       history.replaceState(null, "", `#search?q=${encodeURIComponent(q)}` +
         ($("#spk").value ? `&spk=${encodeURIComponent($("#spk").value)}` : ""));
       executeSearch();
-      logSearch(q);
       $("#recent-searches").hidden = true;
       $("#try-box").hidden = true;
       clearInterval(recentSearchesTimer);
     }, 200);
   });
+  // The shared "recently searched" list should get finished thoughts, not a
+  // prefix caught mid-word — a fixed typing-pause timer logged a half-typed
+  // query whenever someone paused to think, so log only once they're
+  // actually done: field loses focus, tab goes hidden, or the page unloads.
+  const logCurrentQuery = () => {
+    const q = $("#q").value.trim();
+    if (q.length >= 2) logSearch(q);
+  };
+  $("#q").addEventListener("blur", logCurrentQuery);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) logCurrentQuery();
+  });
+  window.addEventListener("pagehide", logCurrentQuery);
   $("#more-btn").addEventListener("click", () => renderResults(false));
   $("#player-close").addEventListener("click", closePlayer);
   // If a stream errors out, forget the src so the next click starts clean.
